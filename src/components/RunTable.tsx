@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { CUE_TYPE_META, type CueType } from '../types';
+import { CUE_TYPE_META, REPLAY_STATUS_META, type CueType, type ReplayStatus } from '../types';
 import type { ScheduleResult } from '../lib/schedule';
 import type { CueFlowNode } from './CueNode';
 
@@ -8,6 +8,10 @@ interface RunTableProps {
   schedule: ScheduleResult;
   selectedId: string | null;
   onSelect: (id: string) => void;
+  /** 排练回放模式下显示状态列 */
+  replayMode?: boolean;
+  /** 回放模式下各节点的当前状态（由演出时钟重算得到） */
+  replayStatusById?: Map<string, ReplayStatus>;
 }
 
 type SortKey =
@@ -38,7 +42,7 @@ function fmt(v: number): string {
 }
 
 /** 可排序运行表：与画布联动高亮（选中同步 + 关键路径同步） */
-export function RunTable({ nodes, schedule, selectedId, onSelect }: RunTableProps) {
+export function RunTable({ nodes, schedule, selectedId, onSelect, replayMode = false, replayStatusById }: RunTableProps) {
   const [sortKey, setSortKey] = useState<SortKey>('earliestStart');
   const [sortAsc, setSortAsc] = useState(true);
   const rowRefs = useRef(new Map<string, HTMLTableRowElement>());
@@ -98,6 +102,7 @@ export function RunTable({ nodes, schedule, selectedId, onSelect }: RunTableProp
         <table>
           <thead>
             <tr>
+              {replayMode ? <th className="th-replay">状态</th> : null}
               {COLUMNS.map((c) => (
                 <th
                   key={c.key}
@@ -113,21 +118,34 @@ export function RunTable({ nodes, schedule, selectedId, onSelect }: RunTableProp
           <tbody>
             {rows.length === 0 ? (
               <tr>
-                <td colSpan={COLUMNS.length} className="panel-empty">
+                <td colSpan={COLUMNS.length + (replayMode ? 1 : 0)} className="panel-empty">
                   暂无节点，请使用左上角按钮添加。
                 </td>
               </tr>
             ) : (
-              rows.map((r) => (
+              rows.map((r) => {
+                const rs = replayMode ? replayStatusById?.get(r.id) : undefined;
+                return (
                 <tr
                   key={r.id}
                   ref={(el) => {
                     if (el) rowRefs.current.set(r.id, el);
                     else rowRefs.current.delete(r.id);
                   }}
-                  className={`${r.critical ? 'row-critical' : ''} ${r.id === selectedId ? 'row-selected' : ''}`}
+                  className={`${r.critical ? 'row-critical' : ''} ${r.id === selectedId ? 'row-selected' : ''} ${rs ? `row-replay row-rs-${rs}` : ''}`}
                   onClick={() => onSelect(r.id)}
                 >
+                  {replayMode ? (
+                    <td className="cell-replay">
+                      {rs ? (
+                        <span className={`rs-badge rs-${rs}`}>
+                          {REPLAY_STATUS_META[rs].icon} {REPLAY_STATUS_META[rs].label}
+                        </span>
+                      ) : (
+                        <span className="res-none">—</span>
+                      )}
+                    </td>
+                  ) : null}
                   <td className="cell-label" title={r.label}>
                     {r.label}
                   </td>
@@ -147,7 +165,8 @@ export function RunTable({ nodes, schedule, selectedId, onSelect }: RunTableProp
                   <td className="num">{fmt(r.latestStart)}</td>
                   <td className={`num ${r.critical ? 'critical-text' : ''}`}>{fmt(r.slack)}</td>
                 </tr>
-              ))
+                );
+              })
             )}
           </tbody>
         </table>

@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Background,
   BackgroundVariant,
@@ -17,6 +17,7 @@ import '@xyflow/react/dist/style.css';
 
 import { CueNode, type CueFlowNode } from './components/CueNode';
 import { Inspector } from './components/Inspector';
+import { ReplayBar, REPLAY_SPEEDS } from './components/ReplayBar';
 import { ResourceBoard } from './components/ResourceBoard';
 import { RunTable } from './components/RunTable';
 import { Toolbar } from './components/Toolbar';
@@ -28,9 +29,10 @@ import {
   normalizeResource,
   wouldCreateCycleWithResources,
 } from './lib/schedule';
+import { cueTimeline, countStatuses, nodeStatusAt, REPLAY_EPS, type CuePoint } from './lib/replay';
 import { uid } from './lib/uid';
 import { createSampleShow } from './sample';
-import { CUE_TYPE_META, type CueNodeData, type CueType } from './types';
+import { CUE_TYPE_META, type CueNodeData, type CueType, type ReplayStatus } from './types';
 
 const nodeTypes = { cue: CueNode };
 
@@ -39,6 +41,9 @@ const EDGE_STYLE_CRITICAL = { stroke: '#ff5a5a', strokeWidth: 2.6 };
 /** 资源串行合成连线：与显式依赖的实线区分，使用金色虚线 */
 const RES_EDGE_STYLE = { stroke: '#d8b46a', strokeWidth: 1.6, strokeDasharray: '6 4' };
 const RES_EDGE_STYLE_CRITICAL = { stroke: '#ff5a5a', strokeWidth: 2.6, strokeDasharray: '6 4' };
+
+/** 到点提示浮层的停留时长（毫秒） */
+const FIRE_ALERT_MS = 3200;
 
 const sample = createSampleShow();
 
@@ -50,6 +55,28 @@ export default function App() {
   const toastTimer = useRef<number | undefined>(undefined);
   const rfInstance = useRef<ReactFlowInstance<CueFlowNode, Edge> | null>(null);
 
+  // ---- 排练回放状态 ----
+  const [replayMode, setReplayMode] = useState(false);
+  const [playing, setPlaying] = useState(false);
+  /** 演出时钟（秒）：所有节点状态都由它与调度区间重算得到 */
+  const [clock, setClock] = useState(0);
+  const [speed, setSpeed] = useState<number>(REPLAY_SPEEDS[1]);
+  /** 到点提示浮层（只展示最近一批到点） */
+  const [fireAlert, setFireAlert] = useState<{ seq: number; labels: string[] } | null>(null);
+
+  /** 播放基准：真实时间 originMs 对应演出时刻 originClock */
+  const originRef = useRef<{ originMs: number; originClock: number } | null>(null);
+  const playingRef = useRef(false);
+  const speedRef = useRef(speed);
+  const clockRef = useRef(0);
+  /** 已经触发过到点提示的节点：跳转 / 暂停继续 / 重置重放均据此去重 */
+  const firedRef = useRef<Set<string>>(new Set());
+  /** 当前调度结果与时间轴的最新值（供 rAF 回调读取，避免闭包过期） */
+  const timelineRef = useRef<CuePoint[]>([]);
+  const totalRef = useRef(0);
+  const fireSeqRef = useRef(0);
+  const fireAlertTimer = useRef<number | undefined>(undefined);
+
   const showToast = useCallback((msg: string) => {
     setToast(msg);
     window.clearTimeout(toastTimer.current);
@@ -59,7 +86,155 @@ export default function App() {
   // 任一节点 / 连线变更后，按依赖 + 资源串行重算最早/最晚时刻与关键路径
   const schedule = useMemo(() => computeSchedule(nodes, edges), [nodes, edges]);
 
-  // 注入计算结果（最早触发时刻、是否关键）供节点渲染
+  // 按当前调度结果建立时间轴（资源串行等待与显式依赖已含于调度时刻）
+  const timeline = useMemo(() => cueTimeline(nodes, schedule), [nodes, schedule]);
+
+  useEffect(() => {
+    timelineRef.current = timeline;
+    totalRef.current = schedule.totalDuration;
+  }, [timeline, schedule.totalDuration]);
+
+  // ---- 到点提示：仅在时钟被演出时钟连续推进（播放）跨越 start 时触发 ----
+  // 拖动时间轴、暂停 / 继续都不会补发；已触发集合保证同一节点不重复提示。
+  const fireCuesInRange = useCallback((from: number, to: number) => {
+    const due = timelineRef.current.filter(
+      (c) => c.start > from - REPLAY_EPS && c.start <= to + REPLAY_EPS && !firedRef.current.has(c.id),
+    );
+    if (due.length === 0) return;
+    for (const c of due) firedRef.current.add(c.id);
+    const seq = ++fireSeqRef.current;
+    setFireAlert({ seq, labels: due.map((c) => `${CUE_TYPE_META[c.cueType].icon} ${c.label}`) });
+    window.clearTimeout(fireAlertTimer.current);
+    fireAlertTimer.current = window.setTimeout(() => {
+      setFireAlert((cur) => (cur && cur.seq === seq ? null : cur));
+    }, FIRE_ALERT_MS);
+  }, []);
+
+  // ---- 演出时钟驱动：requestAnimationFrame，到总时长自动暂停 ----
+  useEffect(() => {
+    if (!playing) {
+      playingRef.current = false;
+      originRef.current = null;
+      return;
+    }
+    playingRef.current = true;
+    speedRef.current = speed;
+    originRef.current = { originMs: performance.now(), originClock: clockRef.current };
+    let raf = 0;
+    const tick = () => {
+      if (!playingRef.current || !originRef.current) return;
+      const elapsed = ((performance.now() - originRef.current.originMs) / 1000) * speedRef.current;
+      const t = originRef.current.originClock + elapsed;
+      const total = totalRef.current;
+      const prev = clockRef.current;
+      if (total > 0 && t >= total) {
+        clockRef.current = total;
+        setClock(total);
+        fireCuesInRange(prev, total);
+        setPlaying(false);
+        return;
+      }
+      clockRef.current = t;
+      setClock(t);
+      fireCuesInRange(prev, t);
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => {
+      playingRef.current = false;
+      cancelAnimationFrame(raf);
+    };
+    // 仅以 playing 为开关；clock / speed 通过 ref 读取，切换倍速时另行重设基准
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [playing]);
+
+  useEffect(() => () => window.clearTimeout(fireAlertTimer.current), []);
+
+  // 调度结构变化（编辑节点 / 连线 / 资源 / 导入 / 清空）后，时钟不得越过新总时长
+  useEffect(() => {
+    if (clockRef.current > schedule.totalDuration + REPLAY_EPS) {
+      clockRef.current = schedule.totalDuration;
+      setClock(schedule.totalDuration);
+      if (schedule.totalDuration === 0) setPlaying(false);
+    }
+  }, [schedule.totalDuration]);
+
+  // ---- 回放控制 ----
+  const resetPlayback = useCallback(() => {
+    setPlaying(false);
+    clockRef.current = 0;
+    setClock(0);
+    firedRef.current = new Set();
+    setFireAlert(null);
+    window.clearTimeout(fireAlertTimer.current);
+  }, []);
+
+  const toggleReplay = useCallback(() => {
+    // 进入 / 退出回放都从头开始；退出时务必停掉演出时钟
+    setPlaying(false);
+    clockRef.current = 0;
+    setClock(0);
+    firedRef.current = new Set();
+    setFireAlert(null);
+    window.clearTimeout(fireAlertTimer.current);
+    setReplayMode((on) => !on);
+  }, []);
+
+  const togglePlay = useCallback(() => {
+    if (schedule.totalDuration <= 0) return;
+    if (playing) {
+      setPlaying(false); // 暂停：时钟保留，继续时由当前时钟重算状态
+      return;
+    }
+    // 已走到末尾再按播放：重置触发记录后从头排练
+    if (clockRef.current + REPLAY_EPS >= schedule.totalDuration) {
+      firedRef.current = new Set();
+      setFireAlert(null);
+      clockRef.current = 0;
+      setClock(0);
+    }
+    setPlaying(true);
+  }, [playing, schedule.totalDuration]);
+
+  /** 拖动时间轴跳转：直接设定时钟，节点状态由新时钟重算；跳转本身不触发提示 */
+  const seek = useCallback(
+    (t: number) => {
+      const clamped = Math.min(Math.max(0, t), schedule.totalDuration);
+      clockRef.current = clamped;
+      setClock(clamped);
+      if (playing) {
+        // 播放中拖动：把播放基准移到跳转后的时刻，避免恢复时时钟跳变补发
+        originRef.current = { originMs: performance.now(), originClock: clamped };
+      }
+    },
+    [schedule.totalDuration],
+  );
+
+  const changeSpeed = useCallback((s: number) => {
+    setSpeed(s);
+    speedRef.current = s;
+    if (playingRef.current) {
+      // 以当前时钟为新基准，倍速切换不改变已走到的时刻
+      originRef.current = { originMs: performance.now(), originClock: clockRef.current };
+    }
+  }, []);
+
+  // 当前时钟下每个节点的状态：暂停 / 继续 / 跳转后都经此重算
+  const replayStatusById = useMemo(() => {
+    const map = new Map<string, ReplayStatus>();
+    if (!replayMode) return map;
+    for (const c of timeline) map.set(c.id, nodeStatusAt(c.start, c.end, clock));
+    return map;
+  }, [replayMode, timeline, clock]);
+
+  const replayCounts = useMemo(() => countStatuses(replayStatusById), [replayStatusById]);
+
+  const nextCue = useMemo(
+    () => timeline.find((c) => c.start > clock + REPLAY_EPS) ?? null,
+    [timeline, clock],
+  );
+
+  // 注入计算结果（最早触发时刻、是否关键、回放状态）供节点渲染
   const displayNodes = useMemo<CueFlowNode[]>(
     () =>
       nodes.map((n) => ({
@@ -68,9 +243,10 @@ export default function App() {
           ...n.data,
           earliestStart: schedule.byId.get(n.id)?.earliestStart,
           critical: schedule.criticalNodeIds.has(n.id),
+          replayStatus: replayMode ? replayStatusById.get(n.id) : undefined,
         },
       })),
-    [nodes, schedule],
+    [nodes, schedule, replayMode, replayStatusById],
   );
 
   const displayEdges = useMemo<Edge[]>(() => {
@@ -182,6 +358,7 @@ export default function App() {
     (id: string) => {
       setNodes((nds) => nds.filter((n) => n.id !== id));
       setEdges((eds) => eds.filter((e) => e.source !== id && e.target !== id));
+      firedRef.current.delete(id);
       setSelectedId((sel) => (sel === id ? null : sel));
     },
     [setNodes, setEdges],
@@ -208,7 +385,8 @@ export default function App() {
     setNodes([]);
     setEdges([]);
     setSelectedId(null);
-  }, [nodes.length, setNodes, setEdges]);
+    resetPlayback();
+  }, [nodes.length, setNodes, setEdges, resetPlayback]);
 
   // 已使用的资源名（去重），供属性面板输入联想
   const resourceOptions = useMemo(
@@ -259,10 +437,11 @@ export default function App() {
         })),
       );
       setSelectedId(null);
+      resetPlayback();
       showToast(`已导入 ${res.nodes.length} 个节点、${res.edges.length} 条连线`);
       window.requestAnimationFrame(() => rfInstance.current?.fitView({ padding: 0.2 }));
     },
-    [setNodes, setEdges, showToast],
+    [setNodes, setEdges, showToast, resetPlayback],
   );
 
   const selectedNode = useMemo(
@@ -282,6 +461,8 @@ export default function App() {
         onExport={exportJson}
         onImportFile={(f) => void importJson(f)}
         onClear={clearAll}
+        replayMode={replayMode}
+        onToggleReplay={toggleReplay}
       />
       <div className="main">
         <div className="canvas-wrap">
@@ -317,6 +498,33 @@ export default function App() {
               检测到依赖与资源串行形成环路：调度结果可能不准确，请检查连线或资源节点顺序。
             </div>
           ) : null}
+          {replayMode && fireAlert ? (
+            <div className="fire-alert" key={fireAlert.seq}>
+              <span className="fire-alert-icon">🔔</span>
+              <span className="fire-alert-text">
+                到点提示：
+                {fireAlert.labels.map((l) => (
+                  <span className="fire-alert-cue" key={l}>
+                    {l}
+                  </span>
+                ))}
+              </span>
+            </div>
+          ) : null}
+          {replayMode ? (
+            <ReplayBar
+              playing={playing}
+              clock={clock}
+              totalDuration={schedule.totalDuration}
+              speed={speed}
+              nextCue={nextCue}
+              counts={replayCounts}
+              onTogglePlay={togglePlay}
+              onReset={resetPlayback}
+              onSeek={seek}
+              onSpeedChange={changeSpeed}
+            />
+          ) : null}
           {toast ? <div className="toast">{toast}</div> : null}
         </div>
         <aside className="sidebar">
@@ -328,7 +536,14 @@ export default function App() {
             onDelete={deleteCue}
           />
           <ResourceBoard schedule={schedule} selectedId={selectedId} onSelect={selectNode} />
-          <RunTable nodes={displayNodes} schedule={schedule} selectedId={selectedId} onSelect={selectNode} />
+          <RunTable
+            nodes={displayNodes}
+            schedule={schedule}
+            selectedId={selectedId}
+            onSelect={selectNode}
+            replayMode={replayMode}
+            replayStatusById={replayStatusById}
+          />
         </aside>
       </div>
     </div>

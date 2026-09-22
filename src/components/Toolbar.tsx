@@ -11,6 +11,8 @@ interface ToolbarProps {
   onExport: () => void;
   onImportFile: (file: File) => void;
   onClear: () => void;
+  replayMode: boolean;
+  onToggleReplay: () => void;
 }
 
 export function Toolbar(props: ToolbarProps) {
@@ -38,6 +40,13 @@ export function Toolbar(props: ToolbarProps) {
       </div>
 
       <div className="toolbar-group">
+        <button
+          className={`btn btn-replay ${props.replayMode ? 'btn-replay-on' : ''}`}
+          onClick={props.onToggleReplay}
+          title="按当前调度结果建立时间轴，以演出时钟排练回放"
+        >
+          {props.replayMode ? '⏹ 退出回放' : '🎼 排练回放'}
+        </button>
         <button className="btn" onClick={props.onAutoLayout} title="按依赖层级自动排列节点">
           ⇥ 整理布局
         </button>

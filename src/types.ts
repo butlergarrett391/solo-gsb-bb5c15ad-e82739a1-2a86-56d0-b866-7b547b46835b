@@ -1,6 +1,18 @@
 /** 提示（Cue）类型：灯光 / 音效 / 演员 */
 export type CueType = 'lighting' | 'sound' | 'actor';
 
+/**
+ * 排练回放中的节点状态（由演出时钟与调度区间唯一确定）：
+ * 待触发（时钟未到最早触发）/ 进行中（触发至结束之间）/ 已完成（时钟越过结束时刻）。
+ */
+export type ReplayStatus = 'pending' | 'inProgress' | 'done';
+
+export const REPLAY_STATUS_META: Record<ReplayStatus, { icon: string; label: string }> = {
+  pending: { icon: '🕓', label: '待触发' },
+  inProgress: { icon: '🟢', label: '进行中' },
+  done: { icon: '✅', label: '已完成' },
+};
+
 /** 画布节点携带的业务数据 */
 export type CueNodeData = {
   /** 显示名称 */
@@ -24,6 +36,8 @@ export type CueNodeData = {
   earliestStart?: number;
   /** 由调度器计算后注入：是否位于关键路径上 */
   critical?: boolean;
+  /** 由回放器注入：当前演出时钟下的排练状态（仅排练回放模式下存在） */
+  replayStatus?: ReplayStatus;
 };
 
 export const CUE_TYPES: CueType[] = ['lighting', 'sound', 'actor'];
