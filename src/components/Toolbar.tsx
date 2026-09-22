@@ -6,6 +6,8 @@ interface ToolbarProps {
   criticalCount: number;
   nodeCount: number;
   resourceCount: number;
+  rehearsal: boolean;
+  onToggleRehearsal: () => void;
   onAdd: (type: CueType) => void;
   onAutoLayout: () => void;
   onExport: () => void;
@@ -35,6 +37,16 @@ export function Toolbar(props: ToolbarProps) {
             {CUE_TYPE_META[t].icon} {CUE_TYPE_META[t].label}
           </button>
         ))}
+      </div>
+
+      <div className="toolbar-group">
+        <button
+          className={`btn btn-rehearsal ${props.rehearsal ? 'btn-rehearsal-on' : ''}`}
+          onClick={props.onToggleRehearsal}
+          title={props.rehearsal ? '退出排练回放，返回编排模式' : '进入排练回放：按调度时间轴播放并提示到点节点'}
+        >
+          {props.rehearsal ? '✎ 退出回放' : '▶ 排练回放'}
+        </button>
       </div>
 
       <div className="toolbar-group">

@@ -1,5 +1,5 @@
 import { Handle, Position, type Node, type NodeProps } from '@xyflow/react';
-import { CUE_TYPE_META, type CueNodeData } from '../types';
+import { CUE_TYPE_META, REPLAY_STATUS_META, type CueNodeData } from '../types';
 
 export type CueFlowNode = Node<CueNodeData, 'cue'>;
 
@@ -11,11 +11,13 @@ function fmt(v: number): string {
 export function CueNode({ data, selected }: NodeProps<CueFlowNode>) {
   const meta = CUE_TYPE_META[data.cueType];
   const resource = data.resource?.trim() ?? '';
+  const runStatus = data.runStatus;
   const cls = [
     'cue-node',
     `cue-${data.cueType}`,
     data.critical ? 'critical' : '',
     selected ? 'selected' : '',
+    runStatus ? `run-${runStatus}` : '',
   ]
     .filter(Boolean)
     .join(' ');
@@ -27,7 +29,12 @@ export function CueNode({ data, selected }: NodeProps<CueFlowNode>) {
         <span className="cue-label" title={data.label}>
           {data.label}
         </span>
-        {data.critical ? <span className="cue-flag">关键</span> : null}
+        {data.critical && !runStatus ? <span className="cue-flag">关键</span> : null}
+        {runStatus ? (
+          <span className={`cue-run-badge cue-run-${runStatus}`}>
+            {REPLAY_STATUS_META[runStatus].icon} {REPLAY_STATUS_META[runStatus].label}
+          </span>
+        ) : null}
       </div>
       <div className="cue-node-meta">
         <span>⏱ {fmt(data.duration)}</span>

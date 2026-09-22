@@ -17,10 +17,12 @@ import '@xyflow/react/dist/style.css';
 
 import { CueNode, type CueFlowNode } from './components/CueNode';
 import { Inspector } from './components/Inspector';
+import { ReplayBar } from './components/ReplayBar';
 import { ResourceBoard } from './components/ResourceBoard';
 import { RunTable } from './components/RunTable';
 import { Toolbar } from './components/Toolbar';
 import { parseShow, serializeShow } from './lib/io';
+import { buildTimeline } from './lib/replay';
 import {
   combinedGraphHasCycle,
   computeSchedule,
@@ -28,6 +30,7 @@ import {
   normalizeResource,
   wouldCreateCycleWithResources,
 } from './lib/schedule';
+import { useReplay } from './hooks/useReplay';
 import { uid } from './lib/uid';
 import { createSampleShow } from './sample';
 import { CUE_TYPE_META, type CueNodeData, type CueType } from './types';
@@ -47,6 +50,8 @@ export default function App() {
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>(sample.edges);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
+  /** 排练回放模式：展示节点回放状态与控制条；编排模式下隐藏 */
+  const [rehearsal, setRehearsal] = useState(false);
   const toastTimer = useRef<number | undefined>(undefined);
   const rfInstance = useRef<ReactFlowInstance<CueFlowNode, Edge> | null>(null);
 
@@ -59,6 +64,11 @@ export default function App() {
   // 任一节点 / 连线变更后，按依赖 + 资源串行重算最早/最晚时刻与关键路径
   const schedule = useMemo(() => computeSchedule(nodes, edges), [nodes, edges]);
 
+  // ---- 排练回放：按当前调度结果建立时间轴 ----
+  // earliestStart / earliestEnd 已包含显式依赖与资源串行等待，回放直接沿用
+  const timeline = useMemo(() => buildTimeline(nodes, schedule), [nodes, schedule]);
+  const replay = useReplay({ timeline, totalDuration: schedule.totalDuration });
+
   // 注入计算结果（最早触发时刻、是否关键）供节点渲染
   const displayNodes = useMemo<CueFlowNode[]>(
     () =>
@@ -68,9 +78,10 @@ export default function App() {
           ...n.data,
           earliestStart: schedule.byId.get(n.id)?.earliestStart,
           critical: schedule.criticalNodeIds.has(n.id),
+          runStatus: rehearsal ? replay.snapshot.statusById.get(n.id) : undefined,
         },
       })),
-    [nodes, schedule],
+    [nodes, schedule, rehearsal, replay.snapshot],
   );
 
   const displayEdges = useMemo<Edge[]>(() => {
@@ -208,7 +219,15 @@ export default function App() {
     setNodes([]);
     setEdges([]);
     setSelectedId(null);
-  }, [nodes.length, setNodes, setEdges]);
+    replay.reset();
+  }, [nodes.length, setNodes, setEdges, replay]);
+
+  // ---- 排练回放模式开关 ----
+  // 进入时从 T+0 开始；退出时停止播放并复位，保证再次进入状态干净
+  const toggleRehearsal = useCallback(() => {
+    replay.reset();
+    setRehearsal((v) => !v);
+  }, [replay]);
 
   // 已使用的资源名（去重），供属性面板输入联想
   const resourceOptions = useMemo(
@@ -259,10 +278,11 @@ export default function App() {
         })),
       );
       setSelectedId(null);
+      replay.reset();
       showToast(`已导入 ${res.nodes.length} 个节点、${res.edges.length} 条连线`);
       window.requestAnimationFrame(() => rfInstance.current?.fitView({ padding: 0.2 }));
     },
-    [setNodes, setEdges, showToast],
+    [setNodes, setEdges, showToast, replay],
   );
 
   const selectedNode = useMemo(
@@ -277,6 +297,8 @@ export default function App() {
         criticalCount={schedule.criticalNodeIds.size}
         nodeCount={nodes.length}
         resourceCount={schedule.resources.length}
+        rehearsal={rehearsal}
+        onToggleRehearsal={toggleRehearsal}
         onAdd={addCue}
         onAutoLayout={autoLayout}
         onExport={exportJson}
@@ -307,9 +329,16 @@ export default function App() {
             <MiniMap
               pannable
               zoomable
-              nodeColor={(n) =>
-                n.data?.critical ? '#ff5a5a' : { lighting: '#e8a13a', sound: '#3fa9f5', actor: '#c678dd' }[(n as CueFlowNode).data.cueType]
-              }
+              nodeColor={(n) => {
+                const d = (n as CueFlowNode).data;
+                if (rehearsal) {
+                  if (d.runStatus === 'running') return '#49c268';
+                  if (d.runStatus === 'done') return '#6ea8fe';
+                }
+                return d.critical
+                  ? '#ff5a5a'
+                  : { lighting: '#e8a13a', sound: '#3fa9f5', actor: '#c678dd' }[d.cueType];
+              }}
             />
           </ReactFlow>
           {schedule.hasCycle ? (
@@ -327,10 +356,22 @@ export default function App() {
             onChange={updateCue}
             onDelete={deleteCue}
           />
-          <ResourceBoard schedule={schedule} selectedId={selectedId} onSelect={selectNode} />
-          <RunTable nodes={displayNodes} schedule={schedule} selectedId={selectedId} onSelect={selectNode} />
+          <ResourceBoard
+            schedule={schedule}
+            selectedId={selectedId}
+            onSelect={selectNode}
+            statusById={rehearsal ? replay.snapshot.statusById : null}
+          />
+          <RunTable
+            nodes={displayNodes}
+            schedule={schedule}
+            selectedId={selectedId}
+            onSelect={selectNode}
+            statusById={rehearsal ? replay.snapshot.statusById : null}
+          />
         </aside>
       </div>
+      {rehearsal ? <ReplayBar replay={replay} totalDuration={schedule.totalDuration} /> : null}
     </div>
   );
 }

@@ -24,6 +24,20 @@ export type CueNodeData = {
   earliestStart?: number;
   /** 由调度器计算后注入：是否位于关键路径上 */
   critical?: boolean;
+  /**
+   * 由回放层注入的当前状态：待触发 / 进行中 / 已完成。
+   * 仅用于运行时渲染，不参与 JSON 导入导出。
+   */
+  runStatus?: ReplayStatus;
+};
+
+/** 排练回放时节点在演出时钟上的状态 */
+export type ReplayStatus = 'waiting' | 'running' | 'done';
+
+export const REPLAY_STATUS_META: Record<ReplayStatus, { label: string; icon: string }> = {
+  waiting: { label: '待触发', icon: '⏸' },
+  running: { label: '进行中', icon: '▶' },
+  done: { label: '已完成', icon: '✓' },
 };
 
 export const CUE_TYPES: CueType[] = ['lighting', 'sound', 'actor'];

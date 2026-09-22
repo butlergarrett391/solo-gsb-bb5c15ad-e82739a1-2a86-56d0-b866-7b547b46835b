@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { CUE_TYPE_META, type CueType } from '../types';
+import { CUE_TYPE_META, REPLAY_STATUS_META, type CueType, type ReplayStatus } from '../types';
 import type { ScheduleResult } from '../lib/schedule';
 import type { CueFlowNode } from './CueNode';
 
@@ -8,6 +8,8 @@ interface RunTableProps {
   schedule: ScheduleResult;
   selectedId: string | null;
   onSelect: (id: string) => void;
+  /** 排练回放时传入各节点当前状态，运行表将显示「待触发 / 进行中 / 已完成」列 */
+  statusById?: Map<string, ReplayStatus> | null;
 }
 
 type SortKey =
@@ -37,8 +39,8 @@ function fmt(v: number): string {
   return `${Number(v.toFixed(1))}s`;
 }
 
-/** 可排序运行表：与画布联动高亮（选中同步 + 关键路径同步） */
-export function RunTable({ nodes, schedule, selectedId, onSelect }: RunTableProps) {
+/** 可排序运行表：与画布联动高亮（选中同步 + 关键路径同步 + 回放状态同步） */
+export function RunTable({ nodes, schedule, selectedId, onSelect, statusById }: RunTableProps) {
   const [sortKey, setSortKey] = useState<SortKey>('earliestStart');
   const [sortAsc, setSortAsc] = useState(true);
   const rowRefs = useRef(new Map<string, HTMLTableRowElement>());
@@ -58,6 +60,7 @@ export function RunTable({ nodes, schedule, selectedId, onSelect }: RunTableProp
         latestStart: s?.latestStart ?? 0,
         slack: s?.slack ?? 0,
         critical: s?.critical ?? false,
+        runStatus: statusById?.get(n.id) ?? null,
       };
     });
     const dir = sortAsc ? 1 : -1;
@@ -74,7 +77,7 @@ export function RunTable({ nodes, schedule, selectedId, onSelect }: RunTableProp
       return cmp * dir;
     });
     return list;
-  }, [nodes, schedule, sortKey, sortAsc]);
+  }, [nodes, schedule, sortKey, sortAsc, statusById]);
 
   // 画布中选中节点时，运行表滚动到对应行
   useEffect(() => {
@@ -98,6 +101,7 @@ export function RunTable({ nodes, schedule, selectedId, onSelect }: RunTableProp
         <table>
           <thead>
             <tr>
+              {statusById ? <th className="th-run-status">回放</th> : null}
               {COLUMNS.map((c) => (
                 <th
                   key={c.key}
@@ -113,7 +117,7 @@ export function RunTable({ nodes, schedule, selectedId, onSelect }: RunTableProp
           <tbody>
             {rows.length === 0 ? (
               <tr>
-                <td colSpan={COLUMNS.length} className="panel-empty">
+                <td colSpan={COLUMNS.length + (statusById ? 1 : 0)} className="panel-empty">
                   暂无节点，请使用左上角按钮添加。
                 </td>
               </tr>
@@ -125,9 +129,18 @@ export function RunTable({ nodes, schedule, selectedId, onSelect }: RunTableProp
                     if (el) rowRefs.current.set(r.id, el);
                     else rowRefs.current.delete(r.id);
                   }}
-                  className={`${r.critical ? 'row-critical' : ''} ${r.id === selectedId ? 'row-selected' : ''}`}
+                  className={`${r.critical ? 'row-critical' : ''} ${r.id === selectedId ? 'row-selected' : ''} ${r.runStatus ? `row-run-${r.runStatus}` : ''}`}
                   onClick={() => onSelect(r.id)}
                 >
+                  {r.runStatus ? (
+                    <td>
+                      <span className={`run-cell-badge run-cell-${r.runStatus}`}>
+                        {REPLAY_STATUS_META[r.runStatus].icon} {REPLAY_STATUS_META[r.runStatus].label}
+                      </span>
+                    </td>
+                  ) : statusById ? (
+                    <td className="run-cell-na">—</td>
+                  ) : null}
                   <td className="cell-label" title={r.label}>
                     {r.label}
                   </td>
